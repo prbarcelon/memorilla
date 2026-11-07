@@ -10,6 +10,120 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-green" alt="License: Apache-2.0"></a>
 </p>
 
+## Evaluating on a Mac (Apple silicon)
+
+`evaluate.py` and the training scripts need vLLM and a CUDA GPU, so they do not run on a Mac. To evaluate a released
+checkpoint on a Mac, use `evaluate_mac.py`.
+
+The script runs the Qwen3-8B decoder with Hugging Face transformers on the Apple GPU (MPS). To score an answer, it
+embeds the answer and each multiple-choice option with Qwen3-Embedding-4B, also in transformers, and picks the closest
+option. The data loading, prompts and metrics come from the same code as `evaluate.py`. The test data includes
+precomputed document and question embeddings, so the script does not embed the documents again. Training needs a
+Linux machine with a CUDA GPU.
+
+### Install
+
+vLLM publishes Linux wheels only. Leave it out when you install:
+
+```bash
+$ uv venv --python 3.11 && source .venv/bin/activate
+$ echo "vllm; sys_platform == 'never'" > /tmp/no-vllm.txt
+$ uv pip install -e ".[dev]" --override /tmp/no-vllm.txt
+$ python -m nltk.downloader -q wordnet punkt
+```
+
+### Run
+
+This command evaluates the PersonaMem-v2 checkpoint on the first 50 test questions:
+
+```bash
+$ python evaluate_mac.py --benchmark pmv2 --limit 50
+```
+
+- Remove `--limit` to run all 5,000 questions.
+- `--batch_size` sets the number of questions in one batch. The default is 16.
+- By default, the script loads the checkpoint folder for the benchmark from `memorilla/Memorilla-Qwen3-8B`. To use a
+  local checkpoint, add `--checkpoint <dir>`.
+- The script writes the predictions and `metrics.json` to `results/mac/<benchmark>/`.
+- The first run downloads about 25 GB of models.
+
+Only PersonaMem-v2 (`--benchmark pmv2`) with the released checkpoint has run on a Mac. The script also accepts the other
+benchmarks, a local `--checkpoint` and `--device cpu`, but these have not run on a Mac.
+
+### Encoder check
+
+Before it scores the answers, the script embeds a few test questions and compares them with the precomputed
+embeddings. If one cosine similarity is less than 0.99, the script stops, because its scores would not be comparable
+with the released ones. On an M5 Max, the lowest similarity is 0.9998.
+
+### Apple GPU attention bug
+
+In PyTorch 2.7, the default attention (SDPA) on the Apple GPU returns NaN for each row of a batch that has left
+padding. The decoder then answers with a string of `!`, and the encoder returns NaN vectors. Rows without padding are
+correct, so a test with one question does not show the bug.
+
+For this reason, both models use eager attention on the Apple GPU. A batch of one question has no padding, so at
+`--batch_size 1` the option `--attn_implementation sdpa` is safe. It makes generation about 30% faster.
+
+### Results on an M5 Max (128 GB)
+
+Each batch holds up to 16 questions. The models were already on disk for these runs.
+
+| PersonaMem-v2 questions | Accuracy | Generation | End to end |
+| --- | --- | --- | --- |
+| 5 | 40.0% | 11 s | 18 s |
+| 50 | 44.0% | 30 s | 43 s |
+| 500 | 44.6% | 5 min 36 s | 6 min 39 s |
+| 5,000 (full test set) | 43.92% | 49 min 24 s | 59 min 11 s |
+
+The paper reports 44.60% on all 5,000 test questions. The full Mac run gives 43.92%, which is 0.68 points lower. At
+5,000 questions, one standard error is 0.70 points, so the 95% range of the Mac result is 42.5% to 45.3%. The paper's
+figure is inside that range.
+
+The smaller runs use the first 5, 50 or 500 test questions. At 500 questions, one standard error is about 2 points. At
+50 questions, it is about 7 points.
+
+### How close a Mac gets to the paper
+
+A Mac matches the paper's accuracy within one standard error, but it does not match each answer word for word.
+
+Decoding is greedy: at each step, the model writes the most likely next token. The authors ran vLLM on H100 GPUs, and
+vLLM runs each question with its own attention code and no padding. On a Mac, the attention type and the batch size
+change the rounding in bf16. A small rounding change can make a different token the most likely one. From that token
+on, the answer is different.
+
+The only published answer for comparison is test row 73 in [Getting started](#getting-started): "What are some easy
+breakfast ideas that will keep me full all morning?" This table shows the row 73 result for each setting:
+
+| Batch size | Attention | Row 73 matches the README | Generation per question |
+| --- | --- | --- | --- |
+| 1 | eager | yes, all 358 characters | 4.44 s |
+| 1 | SDPA | yes, all 358 characters | 3.16 s |
+| 16 | eager | no | 0.67 s |
+| 32 | eager | no | about 5% faster than batch size 16, end to end |
+
+At batch size 16, the row 73 answer is the same as the README up to "blood sugar". Then the model writes "think" where
+the README has "like", and the rest of the answer is different.
+
+A match on row 73 does not show that batch size 1 reproduces vLLM on other questions:
+
+- On the first 32 test questions, eager and SDPA at batch size 1 give the same answer on only 15. On each of the other
+  17, at most one of the two can match the authors' answer.
+- On the first 96 test questions, batch sizes 16 and 32 give the same answer on only 29. Accuracy is 40.62% at both
+  batch sizes.
+- Each setting is repeatable. Two runs at batch size 16 give the same answers on all 96 questions.
+
+To compare with the paper, use accuracy. At batch size 1, eager scores 46.88% and SDPA scores 50.0% on 32 questions. At 32 questions, one standard error is
+about 9 points, so that difference is within the noise.
+
+Batch size 16 is 4.7 to 6.6 times faster than batch size 1. All 5,000 questions take 59 minutes at batch size 16. The
+estimated time at batch size 1 is 4.5 to 6.5 hours. At batch size 16, the full test set scores 43.92%, within one
+standard error of the paper's 44.60%.
+
+---
+
+<p align="center"><em>Original Memorilla README</em></p>
+
 This repository provides code for training and evaluating Memorilla, a memory system that gathers information from an
 entire document collection into a fixed number of query-dependent memory tokens for a frozen LLM. The code is based on
 our paper *[Memorilla: Latent Semantic Memory for LLMs](https://arxiv.org/abs/2610.21375)*.

@@ -226,3 +226,7 @@ misc/
 /pv4_data/
 lightning_logs/
 .memorilla.lock
+
+# Paper source (arXiv 2610.21375v3), local reference only
+paper/
+*.tar.gz
